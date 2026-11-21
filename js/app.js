@@ -3,6 +3,7 @@ import {
   emptyProgress, record, stat, unlockedGroupCount, unlockedChars, pickNext, makeOptions, MASTERED_BOX,
 } from './srs.js';
 import { Sounder } from './audio.js';
+import { canInstall, promptInstall, onInstallChange, iosHintText } from './install.js';
 import { unitMs, classify, letterGapMs, charGapMs, adaptKeyer } from './keyer.js';
 import {
   GROUP_SIZE, POOLS, poolChars, makeGroups, normalizeInput, alignGroup, ladderStep, charsPerMinute, wpmToCpm, isEraseCode,
@@ -847,6 +848,9 @@ function renderProgress() {
         'Открыть все группы сразу'),
       h('button', { class: 'btn', onclick: () => { sounder.ensure(); playCode('А'); } }, '▶ Проверить звук'),
     ),
+    canInstall() && h('button', { class: 'btn wide', onclick: async () => {
+      if (await promptInstall() === 'ios') alert(iosHintText());
+    } }, '⤓ Установить приложение'),
     h('button', { class: 'btn wide danger', onclick: () => {
       if (confirm('Сбросить весь прогресс? Настройки останутся.')) {
         state.progress = emptyProgress();
@@ -926,6 +930,7 @@ window.addEventListener('blur', () => {
 });
 
 render();
+onInstallChange(() => { if (state.tab === 'progress') render(); });
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});

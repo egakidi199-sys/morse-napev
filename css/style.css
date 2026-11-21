@@ -227,6 +227,22 @@ h2 { font-size: 17px; margin: 10px 0 0; }
 .grp-result .pair i { font-size: 24px; }
 .grp-run .key { height: 130px; }
 
+/* предложение установки */
+.install-banner {
+  position: fixed; left: 12px; right: 12px; z-index: 20;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  max-width: 536px; margin: 0 auto;
+  display: grid; grid-template-columns: auto 1fr; gap: 10px 12px; align-items: center;
+  background: var(--surface-2); border: 1px solid var(--accent); border-radius: var(--radius);
+  padding: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  animation: install-in .25s ease-out;
+}
+.install-icon { width: 44px; height: 44px; border-radius: 10px; }
+.install-text { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.install-text span { color: var(--muted); }
+.install-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
+@keyframes install-in { from { transform: translateY(16px); opacity: 0; } }
+
 @media (min-width: 600px) {
   .big-letter { font-size: 120px; }
 }

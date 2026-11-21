@@ -10,6 +10,10 @@
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Событие установки может прийти раньше модулей: сохраняем его до загрузки js/install.js.
+    addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__installPrompt = e; });
+  </script>
 </head>
 <body>
   <header class="top">
