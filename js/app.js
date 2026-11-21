@@ -3,7 +3,10 @@ import {
   emptyProgress, record, stat, unlockedGroupCount, unlockedChars, pickNext, makeOptions, MASTERED_BOX,
 } from './srs.js';
 import { Sounder } from './audio.js';
-import { unitMs, classify, letterGapMs } from './keyer.js';
+import { unitMs, classify, letterGapMs, charGapMs, adaptKeyer } from './keyer.js';
+import {
+  GROUP_SIZE, POOLS, poolChars, makeGroups, normalizeInput, alignGroup, ladderStep, charsPerMinute, wpmToCpm, isEraseCode,
+} from './groups.js';
 
 const STORE_KEY = 'morse-napev.v1';
 const SESSION_LEN = 20;
@@ -15,6 +18,12 @@ const DEFAULT_SETTINGS = {
   freq: 650,
   volume: 0.6,
   showLatin: true,
+  grpPool: 'learned', // набор знаков для групп
+  grpCount: 10, // число групп
+  grpSpeed: 'fixed', // 'fixed' – своя скорость, 'race' – на скорость
+  grpRxWpm: 12, // скорость приёма групп
+  grpGap: 1.5, // растяжение пауз между знаками при приёме
+  grpTxWpm: 8, // скорость ключа при передаче групп
 };
 
 function load() {
@@ -23,7 +32,7 @@ function load() {
     if (raw) {
       return {
         settings: { ...DEFAULT_SETTINGS, ...raw.settings },
-        progress: { ...emptyProgress(), ...raw.progress },
+        progress: { ...emptyProgress(), ...raw.progress, best: { ...raw.progress?.best } },
       };
     }
   } catch { /* хранилище недоступно */ }
@@ -38,6 +47,7 @@ const state = {
   learn: { group: 0, idx: 0 },
   rx: null,
   tx: null,
+  grp: { mode: 'rx', run: null },
 };
 
 function save() {
@@ -314,6 +324,7 @@ function keyUp() {
   const dur = performance.now() - T.downAt;
   T.downAt = null;
   sounder.keyUp();
+  document.querySelector('.key')?.classList.remove('down');
   const unit = unitMs(state.settings.keyWpm);
   T.presses.push(classify(dur, unit));
   updateTxLive();
@@ -383,6 +394,404 @@ function renderTx() {
       h('button', { class: 'btn ghost', onclick: () => { clearTimeout(gapTimer); clearTimers(); newTxTarget(T.target); render(); } }, 'Другой знак →')),
     h('p', { class: 'tip' }, 'На компьютере ключом служит пробел.'),
   );
+}
+
+// ---------- Группы по 5 знаков ----------
+
+let grpGapTimer = null;
+
+function speedLabel(wpm) {
+  return `${wpm} сл/мин · ≈${wpmToCpm(wpm)} зн/мин`;
+}
+
+function setBest(key, value) {
+  state.progress = { ...state.progress, best: { ...state.progress.best, [key]: value } };
+  save();
+}
+
+function startGroups() {
+  const G = state.grp;
+  const s = state.settings;
+  clearTimers();
+  clearTimeout(grpGapTimer);
+  const groups = makeGroups(poolChars(s.grpPool, unlockedChars(state.progress)), s.grpCount);
+  const race = s.grpSpeed === 'race';
+  if (G.mode === 'rx') {
+    G.run = {
+      kind: 'rx', race, groups, i: 0, wpm: s.grpRxWpm, startWpm: s.grpRxWpm, bestWpm: 0,
+      results: [], phase: 'listen', replayed: false, delta: 0, root: null, input: null,
+    };
+    render();
+    playRxGroup();
+  } else {
+    G.run = {
+      kind: 'tx', race, groups, text: groups.join(''), sent: [], presses: [], unit: unitMs(s.grpTxWpm),
+      downAt: null, startAt: null, lastUpAt: null, endAt: null, done: false, root: null,
+    };
+    render();
+  }
+}
+
+function stopGroups() {
+  clearTimers();
+  clearTimeout(grpGapTimer);
+  sounder.stop();
+  sounder.keyUp();
+  state.grp.run = null;
+  render();
+}
+
+// Ячейки сверки: сверху переданный знак, снизу принятый.
+function pairsEl(cells) {
+  return h('div', { class: 'pairs' }, cells.map((c) => {
+    const st = c.cls || (c.t === c.g ? 'ok' : c.t == null ? 'extra' : c.g == null ? 'miss' : 'bad');
+    return h('span', { class: `pair ${st}` }, h('b', {}, c.t ?? ' '), h('i', {}, c.g ?? '_'));
+  }));
+}
+
+function blankEl(groupsCells) {
+  return h('div', { class: 'blank' }, groupsCells.map((cells) => h('div', { class: 'grp' }, pairsEl(cells))));
+}
+
+// --- приём групп ---
+
+function playRxGroup(replay = false) {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'rx' || R.done) return;
+  if (replay) {
+    if (R.phase === 'listen') R.replayed = true;
+  } else {
+    R.phase = 'listen';
+    R.replayed = false;
+    if (R.input) R.input.value = '';
+    updateRx();
+  }
+  sounder.playSequence([...R.groups[R.i]].map((ch) => BY_CHAR[ch].code), { wpm: R.wpm, gapScale: state.settings.grpGap });
+  R.input?.focus();
+}
+
+function checkRx(raw) {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'rx' || R.phase !== 'listen') return;
+  const got = normalizeInput(raw).slice(0, GROUP_SIZE);
+  const target = R.groups[R.i];
+  const { cells, errors } = alignGroup(target, got);
+  R.results.push({ target, got, cells, errors, wpm: R.wpm });
+  if (errors === 0 && !R.replayed) R.bestWpm = Math.max(R.bestWpm, R.wpm);
+  const before = R.wpm;
+  if (R.race && !(R.replayed && errors === 0)) R.wpm = ladderStep(R.wpm, errors);
+  R.delta = R.wpm - before;
+  R.phase = 'shown';
+  sounder.stop();
+  sounder.blip(errors === 0);
+  if (R.input) R.input.value = '';
+  updateRx();
+  if (errors === 0) after(900, nextRx);
+}
+
+function nextRx() {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'rx' || R.phase !== 'shown') return;
+  clearTimers();
+  R.i += 1;
+  if (R.i >= R.groups.length) finishRx();
+  else playRxGroup();
+}
+
+function finishRx() {
+  const R = state.grp.run;
+  if (!R || R.done) return;
+  clearTimers();
+  sounder.stop();
+  R.done = true;
+  R.prevBest = state.progress.best.grpRx || 0;
+  if (R.bestWpm > R.prevBest) setBest('grpRx', R.bestWpm);
+  render();
+}
+
+function rxView(R) {
+  if (R.root && $view.contains(R.root)) { updateRx(); return; }
+  const input = h('input', {
+    class: 'grp-input', type: 'text', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'characters',
+    spellcheck: 'false', enterkeyhint: 'next', lang: 'ru', maxlength: 12, 'aria-label': 'Принятая группа',
+  });
+  input.addEventListener('input', (e) => {
+    if (e.isComposing) return;
+    if (R.phase !== 'listen') { input.value = ''; return; }
+    const v = normalizeInput(input.value);
+    input.value = v;
+    if (v.length >= GROUP_SIZE) checkRx(v);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (R.phase === 'listen') checkRx(input.value);
+    else nextRx();
+  });
+  R.input = input;
+  R.root = h('div', { class: 'grp-run' },
+    h('div', { class: 'session-bar' },
+      h('div', { class: 'bar' }, h('div', { class: 'fill' })),
+      h('span', { class: 'grp-count' })),
+    h('div', { class: 'grp-speed muted' }),
+    h('div', { class: 'card grp-card' }, h('div', { class: 'grp-status' }), input),
+    h('div', { class: 'row grp-actions' }),
+    h('div', { class: 'grp-done' }),
+    h('button', { class: 'btn ghost wide', onclick: () => (R.results.length ? finishRx() : stopGroups()) }, 'Закончить'),
+  );
+  mount(R.root);
+  updateRx();
+  input.focus();
+}
+
+function updateRx() {
+  const R = state.grp.run;
+  if (!R?.root) return;
+  const q = (sel) => R.root.querySelector(sel);
+  const n = R.groups.length;
+  q('.fill').style.width = `${(R.results.length / n) * 100}%`;
+  q('.grp-count').textContent = `Группа ${Math.min(R.i + 1, n)} / ${n}`;
+  q('.grp-speed').textContent = `${R.race ? 'На скорость: ' : ''}${speedLabel(R.wpm)}`;
+
+  const last = R.results[R.i];
+  if (R.phase === 'listen') {
+    q('.grp-status').replaceChildren(h('div', { class: 'muted' }, 'Слушайте и печатайте знаки группы'));
+    R.input.placeholder = '• • • • •';
+    q('.grp-actions').replaceChildren(
+      h('button', { class: 'btn', onclick: () => playRxGroup(true) }, '⟲ Повторить'),
+      h('button', { class: 'btn primary', onclick: () => checkRx(R.input.value) }, 'Готово'));
+  } else {
+    const msg = last.errors === 0 ? '✓ Без ошибок' : `Ошибок: ${last.errors}`;
+    const delta = R.delta > 0 ? ` · скорость ↑ ${R.wpm}` : R.delta < 0 ? ` · скорость ↓ ${R.wpm}` : '';
+    q('.grp-status').replaceChildren(
+      h('div', { class: 'grp-result' }, pairsEl(last.cells)),
+      h('div', { class: `status ${last.errors === 0 ? 'ok' : 'bad'}` }, msg + delta));
+    R.input.placeholder = 'Enter – дальше';
+    q('.grp-actions').replaceChildren(
+      h('button', { class: 'btn', onclick: () => playRxGroup(true) }, '▶ Прослушать'),
+      h('button', { class: 'btn primary', onclick: nextRx }, 'Дальше →'));
+  }
+  const done = R.results.slice(0, R.phase === 'shown' ? R.i : R.results.length);
+  q('.grp-done').replaceChildren(done.length ? blankEl(done.map((r) => r.cells)) : '');
+}
+
+function rxSummary(R) {
+  const total = R.results.length * GROUP_SIZE;
+  const errs = R.results.reduce((a, r) => a + Math.min(r.errors, GROUP_SIZE), 0);
+  const acc = total ? Math.round(((total - errs) / total) * 100) : 0;
+  const missed = {};
+  R.results.forEach((r) => r.cells.forEach((c) => { if (c.t && c.t !== c.g) missed[c.t] = (missed[c.t] || 0) + 1; }));
+  const top = Object.entries(missed).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  mount(
+    h('div', { class: 'card summary' },
+      h('div', { class: 'score' }, `${acc} %`),
+      h('div', {}, `точность приёма, ${R.results.length} гр. (${total} зн.)`),
+      R.race
+        ? h('div', { class: 'muted' }, `Скорость: ${R.startWpm} → ${R.wpm} сл/мин`)
+        : h('div', { class: 'muted' }, speedLabel(R.startWpm)),
+      R.bestWpm > 0 && h('div', {}, `Лучшая группа без ошибок: ${speedLabel(R.bestWpm)}`),
+      R.bestWpm > R.prevBest && h('div', { class: 'unlock' }, `Новый рекорд: ${R.bestWpm} сл/мин`),
+      top.length > 0 && h('div', { class: 'muted' }, `Чаще ошибки: ${top.map(([ch, k]) => `${ch} ×${k}`).join(', ')}`),
+      blankEl(R.results.map((r) => r.cells))),
+    h('button', { class: 'btn wide primary', onclick: startGroups }, 'Ещё раз'),
+    h('button', { class: 'btn wide', onclick: stopGroups }, 'Настройки'),
+  );
+}
+
+// --- передача групп ---
+
+function grpKeyDown() {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'tx' || R.done || R.downAt != null) return;
+  clearTimeout(grpGapTimer);
+  R.downAt = performance.now();
+  if (R.startAt == null) R.startAt = R.downAt;
+  sounder.keyDown();
+  R.root?.querySelector('.key')?.classList.add('down');
+}
+
+function grpKeyUp() {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'tx' || R.downAt == null) return;
+  const now = performance.now();
+  const dur = now - R.downAt;
+  R.downAt = null;
+  R.lastUpAt = now;
+  sounder.keyUp();
+  R.root?.querySelector('.key')?.classList.remove('down');
+  if (R.done) return;
+  if (R.race) {
+    const a = adaptKeyer(R.unit, dur);
+    R.presses.push(a.sym);
+    R.unit = a.unit;
+  } else {
+    R.presses.push(classify(dur, R.unit));
+  }
+  updateTx();
+  clearTimeout(grpGapTimer);
+  grpGapTimer = setTimeout(grpFinishChar, charGapMs(R.unit));
+}
+
+function flushPresses(R) {
+  if (!R.presses.length) return;
+  const code = R.presses.join('');
+  R.presses = [];
+  if (isEraseCode(code)) {
+    R.sent.pop();
+  } else {
+    R.sent.push(BY_CODE[code]?.ch || '?');
+    R.endAt = R.lastUpAt;
+  }
+}
+
+function grpFinishChar() {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'tx' || R.done || R.downAt != null) return;
+  flushPresses(R);
+  updateTx();
+  if (R.sent.length >= R.text.length) finishTx();
+}
+
+function eraseTx() {
+  const R = state.grp.run;
+  if (!R || R.done) return;
+  clearTimeout(grpGapTimer);
+  if (R.presses.length) R.presses = [];
+  else R.sent.pop();
+  updateTx();
+}
+
+function finishTx() {
+  const R = state.grp.run;
+  if (!R || R.kind !== 'tx' || R.done) return;
+  clearTimeout(grpGapTimer);
+  flushPresses(R);
+  sounder.keyUp();
+  R.downAt = null;
+  R.done = true;
+  const total = R.text.length;
+  R.errors = [...R.text].filter((ch, i) => R.sent[i] !== ch).length;
+  R.accuracy = Math.round(((total - R.errors) / total) * 100);
+  R.cpm = R.startAt != null && R.endAt ? charsPerMinute(R.sent.length, R.endAt - R.startAt) : 0;
+  R.prevBest = state.progress.best.grpTx || 0;
+  // Рекорд засчитывается только при точности от 90 %.
+  if (R.accuracy >= 90 && R.cpm > R.prevBest) setBest('grpTx', R.cpm);
+  sounder.blip(R.errors === 0);
+  render();
+}
+
+function txCells(R) {
+  return R.groups.map((g, gi) => [...g].map((t, k) => {
+    const i = gi * GROUP_SIZE + k;
+    const got = R.sent[i];
+    if (got == null) return { t, g: null, cls: !R.done && i === R.sent.length ? 'cur' : R.done ? 'miss' : 'todo' };
+    return { t, g: got };
+  }));
+}
+
+function txView(R) {
+  if (R.root && $view.contains(R.root)) { updateTx(); return; }
+  const key = h('button', { class: 'key', 'aria-label': 'Телеграфный ключ' }, 'КЛЮЧ');
+  key.addEventListener('pointerdown', (e) => { e.preventDefault(); key.setPointerCapture?.(e.pointerId); grpKeyDown(); });
+  key.addEventListener('pointerup', (e) => { e.preventDefault(); grpKeyUp(); });
+  key.addEventListener('pointercancel', grpKeyUp);
+  key.addEventListener('contextmenu', (e) => e.preventDefault());
+  R.root = h('div', { class: 'grp-run' },
+    h('div', { class: 'session-bar' }, h('span', { class: 'grp-count' }), h('span', { class: 'grp-speed muted' })),
+    h('div', { class: 'grp-blank' }),
+    h('div', { class: 'tx-live-wrap' }, h('div', { class: 'label' }, 'Текущий знак'), h('div', { class: 'tx-live' })),
+    key,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn ghost', onclick: eraseTx }, '⌫ Стереть'),
+      h('button', { class: 'btn primary', onclick: finishTx }, 'Готово')),
+    h('p', { class: 'tip' }, 'Передавайте группы подряд, между знаками пауза. Шесть точек подряд стирают знак. На компьютере ключом служит пробел.'),
+  );
+  mount(R.root);
+  updateTx();
+}
+
+function updateTx() {
+  const R = state.grp.run;
+  if (!R?.root) return;
+  const q = (sel) => R.root.querySelector(sel);
+  q('.grp-count').textContent = `Передано ${R.sent.length} / ${R.text.length}`;
+  const keyWpm = Math.round(1200 / R.unit);
+  const live = R.startAt != null && R.endAt ? charsPerMinute(R.sent.length, R.endAt - R.startAt) : 0;
+  q('.grp-speed').textContent = R.race
+    ? `темп ${live || '–'} зн/мин · ключ ≈${keyWpm} сл/мин`
+    : `ключ ${keyWpm} сл/мин`;
+  q('.grp-blank').replaceChildren(blankEl(txCells(R)));
+  q('.tx-live').replaceChildren(codeEl(R.presses.join(''), 'code-mid'));
+}
+
+function txSummary(R) {
+  mount(
+    h('div', { class: 'card summary' },
+      h('div', { class: 'score' }, `${R.accuracy} %`),
+      h('div', {}, `точность передачи, ${R.text.length - R.errors} из ${R.text.length} знаков`),
+      R.cpm > 0 && h('div', {}, `Скорость: ${R.cpm} зн/мин (≈${Math.round(R.cpm / 5)} сл/мин)`),
+      R.accuracy >= 90 && R.cpm > R.prevBest && h('div', { class: 'unlock' }, `Новый рекорд: ${R.cpm} зн/мин`),
+      R.accuracy < 90 && R.cpm > 0 && h('div', { class: 'muted' }, 'Рекорд засчитывается при точности от 90 %'),
+      blankEl(txCells(R))),
+    h('button', { class: 'btn wide primary', onclick: startGroups }, 'Ещё раз'),
+    h('button', { class: 'btn wide', onclick: stopGroups }, 'Настройки'),
+  );
+}
+
+// --- выбор режима ---
+
+function groupsSetup() {
+  const G = state.grp;
+  const s = state.settings;
+  const isRx = G.mode === 'rx';
+  const race = s.grpSpeed === 'race';
+  const set = (k, v) => { s[k] = v; save(); render(); };
+  const chipRow = (opts, key) => h('div', { class: 'chips wrap' },
+    opts.map(([v, label]) => h('button', { class: `chip ${s[key] === v ? 'active' : ''}`, onclick: () => set(key, v) }, label)));
+  const best = isRx ? state.progress.best.grpRx : state.progress.best.grpTx;
+  let hint;
+  if (isRx) {
+    hint = race
+      ? 'После группы без ошибок скорость растёт на 1 сл/мин, после двух и более ошибок снижается.'
+      : 'Все группы звучат на выбранной скорости.';
+  } else {
+    hint = race
+      ? 'Ключ подстраивается под ваш темп, засекается скорость передачи.'
+      : 'Ключ настроен на выбранную скорость: держите ровный темп.';
+  }
+
+  mount(
+    h('div', { class: 'chips' },
+      [['rx', '◉ Приём'], ['tx', '▬ Передача']].map(([m, l]) => h('button', {
+        class: `chip seg ${G.mode === m ? 'active' : ''}`, onclick: () => { G.mode = m; render(); },
+      }, l))),
+    h('p', { class: 'tip' }, isRx
+      ? 'Звучат группы по 5 случайных знаков, как в радиограмме. Печатайте принятое: группа проверяется после пятого знака.'
+      : 'На экране радиограмма из групп по 5 знаков. Передайте её ключом подряд, приложение расшифрует и сверит.'),
+    h('div', { class: 'card settings' },
+      h('div', { class: 'label' }, 'Знаки'),
+      chipRow(Object.entries(POOLS).map(([k, l]) => [k, k === 'learned' ? `${l} (${unlockedChars(state.progress).length})` : l]), 'grpPool'),
+      h('div', { class: 'label' }, 'Число групп'),
+      chipRow([5, 10, 15, 20].map((n) => [n, String(n)]), 'grpCount'),
+      h('div', { class: 'label' }, 'Скорость'),
+      chipRow([['fixed', 'Своя'], ['race', 'На скорость']], 'grpSpeed'),
+      h('div', { class: 'tip' }, hint),
+      isRx
+        ? slider(race ? 'Начальная скорость' : 'Скорость', 'grpRxWpm', 5, 40, 1, speedLabel)
+        : slider(race ? 'Начальный темп ключа' : 'Скорость ключа', 'grpTxWpm', 4, 25, 1, speedLabel),
+      isRx && slider('Паузы между знаками', 'grpGap', 1, 3, 0.5, (v) => (v === 1 ? 'как в коде' : `длиннее ×${v}`)),
+    ),
+    best ? h('div', { class: 'muted' }, `Рекорд: ${isRx ? `${best} сл/мин без ошибок` : `${best} зн/мин`}`) : null,
+    h('button', { class: 'btn wide primary', onclick: () => { sounder.ensure(); startGroups(); } }, 'Начать'),
+  );
+}
+
+function renderGroups() {
+  const R = state.grp.run;
+  if (!R) groupsSetup();
+  else if (R.done) (R.kind === 'rx' ? rxSummary : txSummary)(R);
+  else if (R.kind === 'rx') rxView(R);
+  else txView(R);
 }
 
 // ---------- Прогресс и настройки ----------
@@ -461,15 +870,18 @@ function render() {
   if (state.tab === 'learn') renderLearn();
   else if (state.tab === 'rx') renderRx();
   else if (state.tab === 'tx') renderTx();
+  else if (state.tab === 'groups') renderGroups();
   else renderProgress();
 }
 
 function switchTab(tab) {
   clearTimers();
   clearTimeout(gapTimer);
+  clearTimeout(grpGapTimer);
   sounder.stop();
   sounder.keyUp();
   if (state.tx) state.tx.downAt = null;
+  if (state.grp.run) state.grp.run.downAt = null;
   state.tab = tab;
   render();
   window.scrollTo(0, 0);
@@ -487,6 +899,15 @@ document.addEventListener('keydown', (e) => {
     if (!e.repeat) keyDown();
     return;
   }
+  const G = state.grp.run;
+  if (state.tab === 'groups' && G && !G.done) {
+    if (G.kind === 'tx' && e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) grpKeyDown();
+      return;
+    }
+    if (G.kind === 'rx' && G.phase === 'shown' && e.key === 'Enter') { nextRx(); return; }
+  }
   if (state.tab === 'rx' && state.rx?.q) {
     const q = state.rx.q;
     const k = e.key.toUpperCase();
@@ -497,8 +918,12 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('keyup', (e) => {
   if (state.tab === 'tx' && e.code === 'Space') { e.preventDefault(); keyUp(); }
+  if (state.tab === 'groups' && e.code === 'Space' && state.grp.run?.kind === 'tx') { e.preventDefault(); grpKeyUp(); }
 });
-window.addEventListener('blur', () => { if (state.tx?.downAt != null) keyUp(); });
+window.addEventListener('blur', () => {
+  if (state.tx?.downAt != null) keyUp();
+  if (state.grp.run?.downAt != null) grpKeyUp();
+});
 
 render();
 

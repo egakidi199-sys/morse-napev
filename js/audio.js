@@ -75,6 +75,28 @@ export class Sounder {
     return total * 1000;
   }
 
+  // Проигрывает несколько знаков подряд. gapScale растягивает паузы между знаками.
+  // onChar(i) – начало i-го знака.
+  playSequence(codes, { wpm, gapScale = 1, onChar, onEnd } = {}) {
+    this.ensure();
+    this.stop();
+    const u = unitMs(wpm) / 1000;
+    let t = this.ctx.currentTime + 0.08;
+    const t0 = t;
+    codes.forEach((code, ci) => {
+      if (onChar) this.later(t - t0 + 0.08, () => onChar(ci));
+      [...code].forEach((sym) => {
+        const dur = sym === '.' ? u : 3 * u;
+        this.tone(t, dur);
+        t += dur + u;
+      });
+      t += (3 * gapScale - 1) * u;
+    });
+    const total = t - t0 + 0.08;
+    if (onEnd) this.later(total, onEnd);
+    return total * 1000;
+  }
+
   later(sec, fn) {
     this.timers.push(setTimeout(fn, sec * 1000));
   }

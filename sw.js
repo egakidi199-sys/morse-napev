@@ -1,5 +1,5 @@
 // Офлайн: всё приложение кладётся в кэш при установке, дальше cache-first.
-const VERSION = 'morse-napev-v2';
+const VERSION = 'morse-napev-v3';
 const FILES = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const FILES = [
   './js/srs.js',
   './js/audio.js',
   './js/keyer.js',
+  './js/groups.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',

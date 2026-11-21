@@ -38,7 +38,7 @@ h2 { font-size: 17px; margin: 10px 0 0; }
 
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   background: rgba(20, 22, 28, .96); border-top: 1px solid var(--line);
   padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
   backdrop-filter: blur(8px);
@@ -194,6 +194,38 @@ h2 { font-size: 17px; margin: 10px 0 0; }
 .about { color: var(--muted); font-size: 14px; }
 .about summary { cursor: pointer; color: var(--text); font-weight: 600; padding: 6px 0; }
 .about p { margin: 6px 0; }
+
+/* группы */
+.chips.wrap { flex-wrap: wrap; overflow: visible; }
+.chip.seg { flex: 1; }
+.grp-run { display: flex; flex-direction: column; gap: 14px; }
+.grp-speed { font-size: 14px; text-align: center; margin-top: -6px; }
+.grp-card { min-height: 180px; justify-content: center; }
+.grp-status { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.grp-input {
+  width: 100%; max-width: 320px; text-align: center; font: 700 34px/1.2 ui-monospace, Consolas, monospace;
+  letter-spacing: .35em; text-transform: uppercase; padding: 10px 12px; border-radius: 14px;
+  background: var(--surface-2); color: var(--text); border: 2px solid var(--line); outline: none;
+}
+.grp-input:focus { border-color: var(--accent); }
+.grp-input::placeholder { color: var(--line); letter-spacing: .1em; font-size: 22px; }
+.blank { width: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+.grp { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 6px 4px; display: flex; justify-content: center; }
+.pairs { display: flex; gap: 2px; justify-content: center; font-family: ui-monospace, Consolas, monospace; }
+.pair { display: flex; flex-direction: column; align-items: center; min-width: 18px; line-height: 1.25; }
+.pair b { font-size: 17px; }
+.pair i { font-style: normal; font-size: 15px; font-weight: 700; }
+.pair.ok i { color: var(--ok); }
+.pair.bad i, .pair.extra i { color: var(--bad); }
+.pair.extra i { text-decoration: line-through; }
+.pair.miss i { color: var(--bad); opacity: .7; }
+.pair.todo i { color: var(--line); }
+.pair.cur b { color: var(--accent); }
+.pair.cur i { color: var(--accent); }
+.grp-result .pairs { gap: 8px; }
+.grp-result .pair b { font-size: 30px; }
+.grp-result .pair i { font-size: 24px; }
+.grp-run .key { height: 130px; }
 
 @media (min-width: 600px) {
   .big-letter { font-size: 120px; }

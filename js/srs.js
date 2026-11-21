@@ -5,7 +5,8 @@ export const MAX_BOX = 5;
 export const MASTERED_BOX = 3;
 
 export function emptyProgress() {
-  return { rx: {}, tx: {}, unlockAll: false };
+  // best: рекорды в группах (grpRx – сл/мин приёма, grpTx – зн/мин передачи)
+  return { rx: {}, tx: {}, unlockAll: false, best: {} };
 }
 
 export function stat(progress, mode, ch) {
